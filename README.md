@@ -1,4 +1,4 @@
-# AIA -- Local AI Assistant
+# AIA, your local AI assistant
 
 Artificial Intelligence Assistant (AIA) is a modular, local-first assistant
 for the terminal. It lets you have conversations, build persistent per-context
@@ -22,28 +22,6 @@ With AIA, you can:
 - Use AIA interactively or pass commands and prompts directly from the shell.
 - Define reusable command scripts in `commands/`.
 
-## Project Structure
-
-| Path | Purpose |
-| --- | --- |
-| `aia/cli/main.py` | Terminal interface, command parsing, command scripts, and output formatting. |
-| `aia/services/ai_assistant.py` | Public assistant facade that coordinates the services. |
-| `aia/services/` | Conversation, file, and tool workflows. |
-| `aia/domain/` | Core in-memory conversation models. |
-| `aia/infrastructure/` | Configuration, persistence, logging, model loading, and model runtime. |
-| `aia/tools/` | Auto-discovered concrete tool implementations. |
-| `aia_cli.py` | Compatibility launcher for running AIA directly from the project directory. |
-| `pyproject.toml` | Package metadata, dependencies, and the `aia` command definition. |
-| `config.json` | User-editable runtime configuration, including the model identifier, storage paths, and file-access policy. |
-| `commands/` | JSON command scripts containing ordered lists of instructions. |
-| `data/` | Data directory used by file and directory tools. |
-| `contexts/` | Persisted conversation state, settings, and per-context memories. |
-| `models/` | Local model files. |
-
-`AIAssistant` is intentionally kept as the public facade used by the terminal
-interface. The implementation is divided into focused services: context state
-and settings are handled by `ContextManager`, model-facing conversation work by
-`ConversationWorkflow`, and file operations by `FileWorkflow`.
 
 ## Installation
 
@@ -105,24 +83,20 @@ On first start, the model manager downloads the model configured in
 be large, and local model execution can require substantial memory. The
 runtime uses CUDA when it is available and otherwise falls back to the CPU.
 
+
 ## Configuration
 
 Choose the model and runtime paths in `config.json`. Network access is normally
-needed only during the initial model setup.
+needed only during the initial setup (download from https://huggingface.co/).
 
 Filesystem tools are restricted to `data/` by default. To permit absolute
-paths outside that directory, set:
-
-```json
-{
-  "allow_external_files": true
-}
-```
+paths outside that directory, set `allow_external_files` to `true`.
 
 Relative paths continue to resolve inside `data/`; only absolute external
 paths are enabled by this setting. Enable it only when the assistant should be
 allowed to read or create generated files elsewhere. Paths beginning with `~`
 are expanded to the current user's home directory.
+
 
 ## Interactive Commands
 
@@ -191,6 +165,7 @@ Run it interactively with:
 Command scripts can contain other commands and ordinary prompts. Nested command
 files are supported, and recursive command-file loops are rejected.
 
+
 ## Tools
 
 Tools are discovered automatically from concrete subclasses of `Tool` in
@@ -209,6 +184,7 @@ The current tool families include:
 
 File and directory tools restrict access to `data/`. The webpage tool accepts
 HTTP and HTTPS URLs and rejects local or private network destinations.
+
 
 ## File Revision
 
@@ -238,7 +214,32 @@ The context store writes snapshots through temporary files and preserves
 backups and compacted snapshots where appropriate. Context deletion removes
 the context's nested memory directory as well.
 
+
+## Project Structure
+
+| Path | Purpose |
+| --- | --- |
+| `aia/cli/main.py` | Terminal interface, command parsing, command scripts, and output formatting. |
+| `aia/services/ai_assistant.py` | Public assistant facade that coordinates the services. |
+| `aia/services/` | Conversation, file, and tool workflows. |
+| `aia/domain/` | Core in-memory conversation models. |
+| `aia/infrastructure/` | Configuration, persistence, logging, model loading, and model runtime. |
+| `aia/tools/` | Auto-discovered concrete tool implementations. |
+| `aia_cli.py` | Compatibility launcher for running AIA directly from the project directory. |
+| `pyproject.toml` | Package metadata, dependencies, and the `aia` command definition. |
+| `config.json` | User-editable runtime configuration, including the model identifier, storage paths, and file-access policy. |
+| `commands/` | JSON command scripts containing ordered lists of instructions. |
+| `data/` | Data directory used by file and directory tools. |
+| `contexts/` | Persisted conversation state, settings, and per-context memories. |
+| `models/` | Local model files. |
+
+`AIAssistant` is intentionally kept as the public facade used by the terminal
+interface. The implementation is divided into focused services: context state
+and settings are handled by `ContextManager`, model-facing conversation work by
+`ConversationWorkflow`, and file operations by `FileWorkflow`.
+
+
 ## License
 
-Copyright (C) 2026 Christian Rauch. AIA is distributed under the
-[GNU General Public License version 3](LICENSE).
+Copyright (C) 2026 Christian Rauch.
+AIA is distributed under the [GNU General Public License version 3](LICENSE).
