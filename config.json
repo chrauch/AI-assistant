@@ -1,0 +1,10 @@
+{
+  "model_id": "google/gemma-4-E4B-it",
+  "models_dir": "models",
+  "commands_dir": "commands",
+  "context_dir": "contexts",
+  "log_dir": "logs",
+  "safe_context": true,
+  "allow_external_files": true,
+  "show_progress": false
+}

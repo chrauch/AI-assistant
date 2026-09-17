@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AIA ai-assistant"
+version = "0.1.0"
+description = "A local-first terminal AI assistant"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { file = "LICENSE" }
+dependencies = [
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+    "Pillow>=11.0.0",
+    "transformers>=4.50.0",
+    "accelerate>=1.5.0",
+    "huggingface_hub>=0.30.0",
+    "safetensors>=0.5.0",
+    "trafilatura>=2.0.0",
+]
+
+[project.scripts]
+aia = "aia.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["aia*"]
