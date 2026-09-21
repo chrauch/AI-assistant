@@ -21,8 +21,7 @@ With AIA, you can:
 - Revise files into timestamped copies and compare them with the originals
   without overwriting the source files.
 - Open files and directories in your preferred editor or file explorer.
-- Automate recurring workflows with reusable command scripts and use the
-  assistant from either an interactive shell or a one-shot command.
+- Automate workflows with reusable scripts in interactive or one-shot mode.
 - Choose from many freely available models; the configured model is downloaded
   automatically when it is first needed.
 
@@ -30,8 +29,7 @@ With AIA, you can:
 ## Installation
 
 AIA requires Python 3.14 or newer. Install Python using your operating
-system's package manager or from [python.org](https://www.python.org/), then
-verify the version:
+system's package manager or from python.org, then verify the version:
 
 ```bash
 python --version
@@ -91,7 +89,7 @@ runtime uses CUDA when it is available and otherwise falls back to the CPU.
 ## Configuration
 
 Choose the model and runtime paths in `config.json`. Network access is normally
-needed only during the initial setup (download from https://huggingface.co/).
+needed only during the initial setup (download from huggingface.co).
 
 Filesystem tools are restricted to `data/` by default. To permit absolute
 paths outside that directory, set `allow_external_files` to `true`.
