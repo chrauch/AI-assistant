@@ -21,7 +21,7 @@ With AIA, you can:
 - Revise files into timestamped copies and compare them with the originals
   without overwriting the source files.
 - Open files and directories in your preferred editor or file explorer.
-- Automate recurring workflows with reusable JSON command scripts and use the
+- Automate recurring workflows with reusable command scripts and use the
   assistant from either an interactive shell or a one-shot command.
 - Choose from many freely available models; the configured model is downloaded
   automatically when it is first needed.
