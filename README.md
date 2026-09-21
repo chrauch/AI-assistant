@@ -7,20 +7,24 @@ keeping your data and model runtime under your control. Its model-agnostic
 design allows you to change the underlying language model without changing the
 assistant's core workflows.
 
-Copyright (C) 2026 Christian Rauch. Distributed under the terms of the
-[GNU General Public License version 3](LICENSE).
+
+## Features
 
 With AIA, you can:
 
-- Have persistent conversations with local AI models.
-- Choose the language model that best suits your needs.
-- Set agent instructions and active tools per conversation.
-- Save and recall memories for each conversation context.
-- Stream responses and let the model call enabled tools when needed.
-- Read files, list directories, fetch public webpages, and manage memories.
-- Revise files into timestamped generated copies without changing the originals.
-- Use AIA interactively or pass commands and prompts directly from the shell.
-- Define reusable command scripts in `commands/`.
+- Run an AI assistant locally with a model you choose and keep conversations,
+  files, settings, and memories on your own machine.
+- Manage independent contexts with their own instructions, tools, and persistent
+  memories, then fork or resume them as needed.
+- Use built-in tools to read files, inspect directories, fetch webpages, and
+  manage context memories.
+- Revise files into timestamped copies and compare them with the originals
+  without overwriting the source files.
+- Open files and directories in your preferred editor or file explorer.
+- Automate recurring workflows with reusable JSON command scripts and use the
+  assistant from either an interactive shell or a one-shot command.
+- Choose from many freely available models; the configured model is downloaded
+  automatically when it is first needed.
 
 
 ## Installation
@@ -106,6 +110,7 @@ Type `/exit` or `//` to leave interactive mode. Common commands include:
 | --- | --- |
 | `/help` or `/?` | List built-in and user-defined commands. |
 | `/new [INSTRUCTION]` | Create and activate a new conversation context. |
+| `/fork` | Copy the active context, including its messages, settings, tools, and memories, then activate the copy. |
 | `/load` | List saved conversation contexts. |
 | `/load ID` | Activate a context by number or identifier. |
 | `/resume ID` | Alias for `/load ID`. |
@@ -131,6 +136,9 @@ Type `/exit` or `//` to leave interactive mode. Common commands include:
 | `/memory +` | Activate all memory tools. |
 | `/memory -` | Deactivate all memory tools. |
 | `/revise FILE [INSTRUCTION]` | Generate a timestamped revised copy and show its changes. |
+| `/edit FILE` | Open a file in the terminal editor and return to AIA when it closes. |
+| `/browse [PATH]` | Open a directory in the file explorer and return to AIA when it closes. |
+| `/` | Open the editor to compose and submit a multiline prompt. |
 | `/system` | Show runtime, model, device, and assistant information. |
 | `/exit` or `//` | Exit interactive mode. |
 | `Ctrl+C` | Interrupt the current model operation. |
@@ -239,7 +247,8 @@ and settings are handled by `ContextManager`, model-facing conversation work by
 `ConversationWorkflow`, and file operations by `FileWorkflow`.
 
 
-## License
+# Disclaimer and Author
+This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License (GPL) version 3 as published by the Free Software Foundation.
+This program is distributed in the hope that it will be useful, but without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose. 
 
 Copyright (C) 2026 Christian Rauch.
-AIA is distributed under the [GNU General Public License version 3](LICENSE).
