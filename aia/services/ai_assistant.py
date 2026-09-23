@@ -113,6 +113,13 @@ class AIAssistant:
         self.context_id = self.context_manager.context_id
         self.agent_instruction = self.context_manager.agent_instruction
 
+    def fork_context(self, context_id: str) -> str:
+        new_context_id = self.context_manager.fork(context_id)
+        self.context_manager.activate(new_context_id)
+        self.context_id = new_context_id
+        self.agent_instruction = self.context_manager.agent_instruction
+        return new_context_id
+
     def delete_context(self, context_id: str) -> None:
         self.context_manager.delete(context_id)
 

@@ -2,6 +2,7 @@
 # Distributed under terms of the GPL3 license.
 
 from pathlib import Path
+import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -54,6 +55,32 @@ class ContextManager:
                 DEFAULT_AGENT_INSTRUCTION,
             )
         )
+
+    def fork(self, context_id: str) -> str:
+        if context_id not in self.contexts:
+            raise ValueError(f"Unknown context ID: {context_id}")
+        source_settings = self.settings[context_id]
+        new_context_id = self.create_context(
+            str(source_settings.get("agent", DEFAULT_AGENT_INSTRUCTION)),
+        )
+        self.contexts[new_context_id] = Context.from_dict(
+            self.contexts[context_id].to_dict(),
+        )
+        self.tools_by_context[new_context_id] = set(
+            self.tools_by_context[context_id],
+        )
+        self.settings[new_context_id] = dict(source_settings)
+        self._save_settings(new_context_id)
+        source_memory = self.store.memory_dir(context_id)
+        target_memory = self.store.memory_dir(new_context_id)
+        for memory_path in source_memory.iterdir():
+            target_path = target_memory / memory_path.name
+            if memory_path.is_dir():
+                shutil.copytree(memory_path, target_path, dirs_exist_ok=True)
+            else:
+                shutil.copy2(memory_path, target_path)
+        self.save(new_context_id)
+        return new_context_id
 
     def latest_context_file(self, context_id: str) -> Path | None:
         return self.store.latest_file(context_id)

@@ -1,5 +1,7 @@
 {
   "model_id": "google/gemma-4-E4B-it",
+  "editor": "nano",
+  "file_explorer": "mc",
   "models_dir": "models",
   "commands_dir": "commands",
   "context_dir": "contexts",

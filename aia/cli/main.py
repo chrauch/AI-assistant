@@ -3,11 +3,15 @@
 
 import json
 from collections.abc import Callable
+import os
 from pathlib import Path
 import platform
+import shlex
 import signal
+import subprocess
 import sys
 import termios
+import threading
 import time
 
 try:
@@ -22,6 +26,7 @@ from aia.infrastructure.config import load_config
 from aia.infrastructure.model_runtime import GenerationCancelled, request_cancel
 from aia.infrastructure.output import BANNER, LICENSE_NOTICE, configure_logging, out
 from aia.services.ai_assistant import AIAssistant, MEMORY_TOOL_NAMES
+from aia.tools.read_file import ReadFileTool
 
 
 CONFIG = load_config()
@@ -29,8 +34,9 @@ configure_logging(CONFIG.log_dir)
 COMMANDS_DIR = CONFIG.commands_dir
 
 
-CONTINUATION_PROMPT = ""
 CHARACTER_DELAY_SECONDS = 0.03
+PROMPT_HISTORY: list[str] = []
+EXIT_REQUESTED = False
 
 
 COMMAND_DESCRIPTIONS = {
@@ -41,20 +47,31 @@ COMMAND_DESCRIPTIONS = {
     "/history": "Show the active conversation history.",
     "/delete GUID": "Delete an inactive conversation.",
     "/new [INSTRUCTION]": "Create a conversation with an optional instruction.",
+    "/fork": "Fork the current conversation context.",
     "/agent [INSTRUCTION]": "Show or change the agent instruction.",
     "/load [GUID|NUMBER]": "List or resume a saved conversation.",
     "/compact [INSTRUCTION]": "Summarize and compact the active conversation.",
     "/revise FILE [INSTRUCTION]": "Revise a file and show the generated diff.",
+    "/edit FILE": "Open a file in the configured terminal editor.",
+    "/browse [PATH]": "Open a directory in the configured file explorer.",
     "/file [+-] FILE": "List, append, or remove context files.",
     "/tool [+-] [NAME]": "List or activate/deactivate model tools.",
     "/memory [+-]": "List or activate/deactivate memory tools.",
-    "/exit or //": "Exit the assistant.",
     "/system": "Show the system information.",
-    "Ctrl+C": "Interrupt the current operation.",
+    "Up/Down": "Navigate prompt history.",
+    "Ctrl+O": "Switch to the editor with the current prompt.",
+    "Ctrl+C": "Clear the current prompt or interrupt generation.",
+    "Ctrl+D": "Exit the assistant.",
 }
 
 
 def handle_interrupt(signum: int, frame: object) -> None:
+    request_cancel()
+
+
+def handle_quit(signum: int, frame: object) -> None:
+    global EXIT_REQUESTED
+    EXIT_REQUESTED = True
     request_cancel()
 
 
@@ -73,6 +90,17 @@ def restore_terminal_attributes(
 ) -> None:
     if terminal_attributes is not None:
         termios.tcsetattr(sys.stdin, termios.TCSANOW, terminal_attributes)
+
+
+def suppress_input_echo() -> list[int] | None:
+    if not sys.stdin.isatty():
+        return None
+    terminal_attributes = termios.tcgetattr(sys.stdin)
+    updated_attributes = terminal_attributes.copy()
+    updated_attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+    updated_attributes[6][termios.VQUIT] = b"\x04"
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, updated_attributes)
+    return terminal_attributes
 
 
 def print_response(text: str, context_id: str | None = None) -> None:
@@ -97,6 +125,54 @@ def print_thinking(text: str, context_id: str | None = None) -> None:
         end="",
         flush=True,
     )
+
+
+class StatusSpinner:
+    #frames = ("▄▀", " █", "▀▄", "▄▄", "▄▀", "█ ", "▀▄", "▀▀")
+    #frames = ("█  ", "▄▀ ", " █ ", " ▄▀", "  █", " ▀▄", " █ ", "▀▄ ")
+    #frames = ("·", "∘", "○", "◌", "◎", "◉", "●", "◉", "◎", "◌", "○", "∘", "·", " ", "·", "∘")
+    #frames = ( "·", ":", "∙", ":", "✦", ":", "∙", ":", "·", " ", "·", ":", "∙", ":", "✦", ":", "∙", ":")
+    frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started_at = 0.0
+
+    def start(self) -> None:
+        if not sys.stdout.isatty():
+            return
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join()
+        sys.stdout.write("\r\033[2K")
+        sys.stdout.flush()
+        self._thread = None
+
+    def _run(self) -> None:
+        frame_index = 0
+        while not self._stop_event.is_set():
+            elapsed = time.monotonic() - self._started_at
+            sys.stdout.write(
+                f"\r{self.frames[frame_index]} Thinking... {elapsed:.0f}s"
+            )
+            sys.stdout.flush()
+            frame_index = (frame_index + 1) % len(self.frames)
+            self._stop_event.wait(0.1)
+
+
+def stop_spinner(spinner: StatusSpinner, callback: Callable[[str], None]) -> Callable[[str], None]:
+    def wrapped(text: str) -> None:
+        spinner.stop()
+        callback(text)
+
+    return wrapped
 
 
 def print_diff(text: str, context_id: str | None = None) -> None:
@@ -124,17 +200,168 @@ def print_diff(text: str, context_id: str | None = None) -> None:
     )
 
 
-def read_prompt() -> str:
-    lines = []
+def read_prompt(assistant: AIAssistant) -> tuple[str, Path | None]:
+    if not sys.stdin.isatty():
+        out("YOU", destination="console", marker=True, end="")
+        return input(), None
+
+    prompt_lines: list[str] = []
+    prompt_path: Path | None = None
+    current_line = ""
+    cursor_index = 0
+    history_index = len(PROMPT_HISTORY)
+    history_draft = ""
+    displayed_line_count = 1
+
+    def clear_prompt_display() -> None:
+        nonlocal displayed_line_count
+        sys.stdout.write("\r\033[2K")
+        for _ in range(displayed_line_count - 1):
+            sys.stdout.write("\033[1A\r\033[2K")
+        displayed_line_count = 1
+
+    def read_escape_sequence() -> bytes:
+        sequence = bytearray(b"\x1b")
+        while len(sequence) < 16:
+            character = os.read(sys.stdin.fileno(), 1)
+            sequence.extend(character)
+            if character in b"~ABCD":
+                break
+        return bytes(sequence)
+
     out("YOU", destination="console", marker=True, end="")
-    while True:
-        line = input()
-        if line.endswith("\\"):
-            lines.append(line[:-1])
-            out("YOU", CONTINUATION_PROMPT, destination="console", end="")
-            continue
-        lines.append(line)
-        return "\n".join(lines)
+    previous_handler = signal.getsignal(signal.SIGINT)
+    terminal_attributes = termios.tcgetattr(sys.stdin)
+    raw_attributes = terminal_attributes.copy()
+    raw_attributes[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+    raw_attributes[6][termios.VMIN] = 1
+    raw_attributes[6][termios.VTIME] = 0
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, raw_attributes)
+    try:
+        while True:
+            character = os.read(sys.stdin.fileno(), 1)
+            if character == b"\x04":
+                raise EOFError
+            if character == b"\x03":
+                raise KeyboardInterrupt
+            if character == b"\x0f":
+                prompt = "\n".join([*prompt_lines, current_line])
+                clear_prompt_display()
+                sys.stdout.flush()
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, terminal_attributes)
+                try:
+                    prompt_path, edited_prompt = edit_prompt(assistant, prompt)
+                finally:
+                    termios.tcsetattr(sys.stdin, termios.TCSANOW, raw_attributes)
+                prompt_lines = edited_prompt.split("\n")
+                current_line = ""
+                cursor_index = 0
+                sys.stdout.write(f"{edited_prompt}\n")
+                sys.stdout.flush()
+                displayed_line_count = len(prompt_lines) + 1
+                continue
+            if character == b"\x1b":
+                sequence = read_escape_sequence()
+                if sequence in {b"\x1b[1;5C", b"\x1b[5C"}:
+                    old_cursor_index = cursor_index
+                    while cursor_index < len(current_line) and current_line[
+                        cursor_index
+                    ].isspace():
+                        cursor_index += 1
+                    while cursor_index < len(current_line) and not current_line[
+                        cursor_index
+                    ].isspace():
+                        cursor_index += 1
+                    distance = cursor_index - old_cursor_index
+                    if distance:
+                        sys.stdout.write(f"\033[{distance}C")
+                    sys.stdout.flush()
+                    continue
+                if sequence in {b"\x1b[1;5D", b"\x1b[5D"}:
+                    old_cursor_index = cursor_index
+                    while cursor_index > 0 and current_line[cursor_index - 1].isspace():
+                        cursor_index -= 1
+                    while cursor_index > 0 and not current_line[cursor_index - 1].isspace():
+                        cursor_index -= 1
+                    distance = old_cursor_index - cursor_index
+                    if distance:
+                        sys.stdout.write(f"\033[{distance}D")
+                    sys.stdout.flush()
+                    continue
+                if sequence in {b"\x1b[C", b"\x1b[D"}:
+                    if sequence == b"\x1b[C" and cursor_index < len(current_line):
+                        cursor_index += 1
+                        sys.stdout.write("\033[C")
+                    elif sequence == b"\x1b[D" and cursor_index > 0:
+                        cursor_index -= 1
+                        sys.stdout.write("\033[D")
+                    sys.stdout.flush()
+                    continue
+                if sequence not in {b"\x1b[A", b"\x1b[B"}:
+                    continue
+                current_prompt = "\n".join([*prompt_lines, current_line])
+                if sequence == b"\x1b[A":
+                    if history_index == len(PROMPT_HISTORY):
+                        history_draft = current_prompt
+                    if history_index > 0:
+                        history_index -= 1
+                        current_prompt = PROMPT_HISTORY[history_index]
+                elif history_index < len(PROMPT_HISTORY):
+                    history_index += 1
+                    current_prompt = (
+                        history_draft
+                        if history_index == len(PROMPT_HISTORY)
+                        else PROMPT_HISTORY[history_index]
+                    )
+                else:
+                    continue
+                prompt_lines = current_prompt.split("\n")[:-1]
+                current_line = current_prompt.split("\n")[-1]
+                cursor_index = len(current_line)
+                clear_prompt_display()
+                sys.stdout.write(current_prompt)
+                displayed_line_count = max(1, len(current_prompt.split("\n")))
+                sys.stdout.flush()
+                continue
+            if character in {b"\r", b"\n"}:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                prompt = "\n".join([*prompt_lines, current_line])
+                if prompt and (not PROMPT_HISTORY or PROMPT_HISTORY[-1] != prompt):
+                    PROMPT_HISTORY.append(prompt)
+                return prompt, prompt_path
+            if character in {b"\x08", b"\x7f"}:  # backspace, delete
+                if cursor_index > 0:
+                    suffix = current_line[cursor_index:]
+                    current_line = (
+                        current_line[: cursor_index - 1]
+                        + current_line[cursor_index:]
+                    )
+                    cursor_index -= 1
+                    sys.stdout.write(
+                        "\b" + suffix + " " + "\b" * (len(suffix) + 1)
+                    )
+                    sys.stdout.flush()
+                continue
+            try:
+                text = character.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if text.isprintable():
+                suffix = current_line[cursor_index:]
+                current_line = (
+                    current_line[:cursor_index] + text + current_line[cursor_index:]
+                )
+                cursor_index += len(text)
+                sys.stdout.write(text + suffix + "\b" * len(suffix))
+                sys.stdout.flush()
+    except (EOFError, KeyboardInterrupt):
+        remove_prompt_file(assistant, prompt_path)
+        raise
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, terminal_attributes)
+        signal.signal(signal.SIGINT, previous_handler)
 
 
 def handle_help(assistant: AIAssistant, argument: str) -> None:
@@ -227,10 +454,6 @@ def handle_system(assistant: AIAssistant, argument: str) -> None:
         json.dumps(runtime.model.generation_config.to_dict(), indent=4, default=str),
     ]
     out("SYS", "\n".join(lines), context_id=assistant.context_id)
-
-
-def handle_exit(assistant: AIAssistant, argument: str) -> None:
-    raise SystemExit
 
 
 def handle_clear(assistant: AIAssistant, argument: str) -> None:
@@ -336,6 +559,15 @@ def handle_new(assistant: AIAssistant, argument: str) -> None:
     out("AIA", f"New agent instruction: {new_instruction}", context_id=assistant.context_id)
 
 
+def handle_fork(assistant: AIAssistant, argument: str) -> None:
+    new_context_id = assistant.fork_context(assistant.context_id)
+    out(
+        "AIA",
+        f"Forked conversation context: {new_context_id}",
+        context_id=assistant.context_id,
+    )
+
+
 def handle_agent(assistant: AIAssistant, argument: str) -> None:
     requested_instruction = argument.strip()
     if not requested_instruction:
@@ -412,11 +644,19 @@ def handle_compact(assistant: AIAssistant, argument: str) -> None:
         end="",
         flush=True,
     )
-    context_file, _, elapsed_seconds, token_count = assistant.compact_context(
-        assistant.context_id,
-        on_text=lambda text: print_response(text, assistant.context_id),
-        instruction=compact_instruction or None,
-    )
+    spinner = StatusSpinner()
+    spinner.start()
+    try:
+        context_file, _, elapsed_seconds, token_count = assistant.compact_context(
+            assistant.context_id,
+            on_text=stop_spinner(
+                spinner,
+                lambda text: print_response(text, assistant.context_id),
+            ),
+            instruction=compact_instruction or None,
+        )
+    finally:
+        spinner.stop()
     out(
         "SYS",
         f"\nCompacted in {elapsed_seconds:.1f}s "
@@ -456,19 +696,223 @@ def handle_revise(assistant: AIAssistant, argument: str) -> None:
         end="",
         flush=True,
     )
-    _, elapsed_seconds, token_count = assistant.revise_file(
-        file_path,
-        additional_instruction.strip() if separator else None,
-        on_text=lambda text: print_response(text, assistant.context_id),
-        on_thinking=lambda text: print_thinking(text, assistant.context_id),
-        on_diff=lambda text: print_diff(text, assistant.context_id),
-    )
+    spinner = StatusSpinner()
+    spinner.start()
+    try:
+        _, elapsed_seconds, token_count = assistant.revise_file(
+            file_path,
+            additional_instruction.strip() if separator else None,
+            on_text=stop_spinner(
+                spinner,
+                lambda text: print_response(text, assistant.context_id),
+            ),
+            on_thinking=stop_spinner(
+                spinner,
+                lambda text: print_thinking(text, assistant.context_id),
+            ),
+            on_diff=stop_spinner(
+                spinner,
+                lambda text: print_diff(text, assistant.context_id),
+            ),
+        )
+    finally:
+        spinner.stop()
     out(
         "SYS",
         f"\nCompleted in {elapsed_seconds:.1f}s "
         f"({token_count} streamed chunks).",
         context_id=assistant.context_id,
         destination="log",
+    )
+
+
+def handle_edit(assistant: AIAssistant, argument: str) -> None:
+    file_path = argument.strip()
+    if not file_path:
+        out(
+            "SYS",
+            "Usage: /edit FILE",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+
+    requested_path = Path(file_path).expanduser()
+    if not requested_path.is_absolute():
+        base_directory = (
+            Path.cwd() if assistant.allow_external_files else ReadFileTool.data_dir
+        )
+        requested_path = base_directory / requested_path
+    requested_path = requested_path.resolve()
+    if not assistant.allow_external_files:
+        try:
+            requested_path.relative_to(ReadFileTool.data_dir.resolve())
+        except ValueError:
+            out(
+                "SYS",
+                "File path must remain inside the data directory.",
+                context_id=assistant.context_id,
+                file=sys.stderr,
+            )
+            return
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or CONFIG.editor
+    try:
+        editor_command = shlex.split(editor)
+        if not editor_command:
+            raise ValueError("Editor command is empty")
+        result = subprocess.run(
+            [*editor_command, str(requested_path)],
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        out(
+            "SYS",
+            f"Could not open editor: {error}",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+    if result.returncode != 0:
+        out(
+            "SYS",
+            f"Editor exited with status {result.returncode}.",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+    out("AIA", f"Finished editing {requested_path}.", context_id=assistant.context_id)
+
+
+def edit_prompt(
+    assistant: AIAssistant,
+    initial_prompt: str = "",
+) -> tuple[Path | None, str]:
+    prompt_path = assistant.context_dir / assistant.context_id / "prompt"
+    try:
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(initial_prompt, encoding="utf-8")
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or CONFIG.editor
+        editor_command = shlex.split(editor)
+        if not editor_command:
+            raise ValueError("Editor command is empty")
+        result = subprocess.run(
+            [*editor_command, str(prompt_path)],
+            check=False,
+        )
+        if result.returncode != 0:
+            out(
+                "SYS",
+                f"Editor exited with status {result.returncode}.",
+                context_id=assistant.context_id,
+                file=sys.stderr,
+            )
+            return prompt_path, ""
+        return prompt_path, prompt_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError, ValueError) as error:
+        out(
+            "SYS",
+            f"Could not edit prompt: {error}",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return prompt_path, ""
+
+
+def remove_prompt_file(assistant: AIAssistant, prompt_path: Path | None) -> None:
+    if prompt_path is None:
+        return
+    try:
+        prompt_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        out(
+            "SYS",
+            f"Could not remove temporary prompt file: {error}",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+
+
+def confirm_edited_prompt(assistant: AIAssistant, prompt: str) -> bool:
+    out(
+        "YOU",
+        prompt,
+        context_id=assistant.context_id,
+        destination="console",
+        marker=True,
+    )
+    previous_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        input()
+    except KeyboardInterrupt:
+        return False
+    except EOFError:
+        return False
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+    return True
+
+
+def handle_browse(assistant: AIAssistant, argument: str) -> None:
+    requested_path = Path(argument.strip() or ".").expanduser()
+    if not requested_path.is_absolute():
+        base_directory = (
+            Path.cwd() if assistant.allow_external_files else ReadFileTool.data_dir
+        )
+        requested_path = base_directory / requested_path
+    requested_path = requested_path.resolve()
+    if not assistant.allow_external_files:
+        try:
+            requested_path.relative_to(ReadFileTool.data_dir.resolve())
+        except ValueError:
+            out(
+                "SYS",
+                "Browser path must remain inside the data directory.",
+                context_id=assistant.context_id,
+                file=sys.stderr,
+            )
+            return
+    if not requested_path.is_dir():
+        out(
+            "SYS",
+            f"Directory not found: {requested_path}",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+
+    explorer = os.environ.get("FILE_EXPLORER") or CONFIG.file_explorer
+    try:
+        explorer_command = shlex.split(explorer)
+        if not explorer_command:
+            raise ValueError("File explorer command is empty")
+        result = subprocess.run(
+            [*explorer_command, str(requested_path)],
+            check=False,
+        )
+    except (OSError, ValueError) as error:
+        out(
+            "SYS",
+            f"Could not open file explorer: {error}",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+    if result.returncode != 0:
+        out(
+            "SYS",
+            f"File explorer exited with status {result.returncode}.",
+            context_id=assistant.context_id,
+            file=sys.stderr,
+        )
+        return
+    out(
+        "AIA",
+        f"Finished browsing {requested_path}.",
+        context_id=assistant.context_id,
     )
 
 
@@ -588,12 +1032,23 @@ def handle_response(assistant: AIAssistant, prompt: str) -> None:
         end="",
         flush=True,
     )
-    _, elapsed_seconds, token_count = assistant.respond(
-        assistant.context_id,
-        prompt,
-        on_text=lambda text: print_response(text, assistant.context_id),
-        on_thinking=lambda text: print_thinking(text, assistant.context_id),
-    )
+    spinner = StatusSpinner()
+    spinner.start()
+    try:
+        _, elapsed_seconds, token_count = assistant.respond(
+            assistant.context_id,
+            prompt,
+            on_text=stop_spinner(
+                spinner,
+                lambda text: print_response(text, assistant.context_id),
+            ),
+            on_thinking=stop_spinner(
+                spinner,
+                lambda text: print_thinking(text, assistant.context_id),
+            ),
+        )
+    finally:
+        spinner.stop()
     out(
         "AIA",
         "\n",
@@ -619,19 +1074,21 @@ def command_handlers(assistant: AIAssistant) -> dict[str, CommandHandler]:
         "/help": handle_help,
         "/?": handle_help,
         "/system": handle_system,
-        "//": handle_exit,
         "/clear": handle_clear,
         "/clean": handle_clean,
         "/truncate": handle_truncate,
         "/history": handle_history,
         "/delete": handle_delete,
         "/new": handle_new,
+        "/fork": handle_fork,
         "/agent": handle_agent,
         "/resume": handle_load,
         "/continue": handle_load,
         "/load": handle_load,
         "/compact": handle_compact,
         "/revise": handle_revise,
+        "/edit": handle_edit,
+        "/browse": handle_browse,
         "/file": handle_file,
         "/tool": handle_tool,
         "/memory": handle_memory,
@@ -721,34 +1178,52 @@ def execute_instruction(
 
 
 def main(argv: list[str] | None = None) -> None:
+    global EXIT_REQUESTED
+    EXIT_REQUESTED = False
     out("SYS", BANNER, destination="console", end="\n", flush=True)
     signal.signal(signal.SIGINT, handle_interrupt)
-    assistant = AIAssistant(
-        CONFIG.models_dir,
-        CONFIG.model_id,
-        CONFIG.context_dir,
-        CONFIG.safe_context,
-        allow_external_files=CONFIG.allow_external_files,
-        show_progress=CONFIG.show_progress,
-        log_dir=CONFIG.log_dir,
-    )
-    handlers = command_handlers(assistant)
-    instructions = sys.argv[1:] if argv is None else argv
-    if instructions:
-        for instruction in instructions:
-            execute_instruction(assistant, instruction, handlers)
-        return
-
     terminal_attributes = suppress_control_character_echo()
     try:
+        loading_quit_handler = signal.getsignal(signal.SIGQUIT)
+        signal.signal(signal.SIGQUIT, handle_quit)
+        loading_terminal_attributes = suppress_input_echo()
+        try:
+            assistant = AIAssistant(
+                CONFIG.models_dir,
+                CONFIG.model_id,
+                CONFIG.context_dir,
+                CONFIG.safe_context,
+                allow_external_files=CONFIG.allow_external_files,
+                show_progress=CONFIG.show_progress,
+                log_dir=CONFIG.log_dir,
+            )
+        finally:
+            restore_terminal_attributes(loading_terminal_attributes)
+            signal.signal(signal.SIGQUIT, loading_quit_handler)
+        if EXIT_REQUESTED:
+            return
+
+        handlers = command_handlers(assistant)
+        instructions = sys.argv[1:] if argv is None else argv
+        if instructions:
+            for instruction in instructions:
+                execute_instruction(assistant, instruction, handlers)
+            return
+
         while True:
+            if sys.stdin.isatty():
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)
             try:
-                prompt = read_prompt().strip()
-            except (EOFError, KeyboardInterrupt):
+                prompt, prompt_path = read_prompt(assistant)
+                prompt = prompt.strip()
+            except EOFError:
+                break
+            except KeyboardInterrupt:
                 out("SYS", "\n", context_id=assistant.context_id, end="", flush=True)
                 continue
-            if prompt == "/exit":
-                break
+            previous_quit_handler = signal.getsignal(signal.SIGQUIT)
+            signal.signal(signal.SIGQUIT, handle_quit)
+            response_terminal_attributes = suppress_input_echo()
             try:
                 execute_instruction(assistant, prompt, handlers)
             except GenerationCancelled:
@@ -766,6 +1241,12 @@ def main(argv: list[str] | None = None) -> None:
                     context_id=assistant.context_id,
                     marker=True,
                 )
+            finally:
+                restore_terminal_attributes(response_terminal_attributes)
+                signal.signal(signal.SIGQUIT, previous_quit_handler)
+                remove_prompt_file(assistant, prompt_path)
+            if EXIT_REQUESTED:
+                break
     finally:
         restore_terminal_attributes(terminal_attributes)
 

@@ -13,6 +13,8 @@ CONFIG_FILE = PROJECT_DIR / "config.json"
 @dataclass(frozen=True)
 class Config:
     model_id: str
+    editor: str
+    file_explorer: str
     models_dir: Path
     commands_dir: Path
     context_dir: Path
@@ -35,6 +37,8 @@ def load_config() -> Config:
 
     return Config(
         model_id=_string_value(values, "model_id", "local-model"),
+        editor=_string_value(values, "editor", "nano"),
+        file_explorer=_string_value(values, "file_explorer", "mc"),
         models_dir=_path_value(values, "models_dir", "models"),
         commands_dir=_path_value(values, "commands_dir", "commands"),
         context_dir=_path_value(values, "context_dir", "contexts"),

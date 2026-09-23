@@ -102,7 +102,7 @@ are expanded to the current user's home directory.
 
 ## Interactive Commands
 
-Type `/exit` or `//` to leave interactive mode. Common commands include:
+Press `Ctrl+D` to leave interactive mode. Common commands include:
 
 | Command | Function |
 | --- | --- |
@@ -136,10 +136,11 @@ Type `/exit` or `//` to leave interactive mode. Common commands include:
 | `/revise FILE [INSTRUCTION]` | Generate a timestamped revised copy and show its changes. |
 | `/edit FILE` | Open a file in the terminal editor and return to AIA when it closes. |
 | `/browse [PATH]` | Open a directory in the file explorer and return to AIA when it closes. |
-| `/` | Open the editor to compose and submit a multiline prompt. |
 | `/system` | Show runtime, model, device, and assistant information. |
-| `/exit` or `//` | Exit interactive mode. |
-| `Ctrl+C` | Interrupt the current model operation. |
+| `Up/Down` | Navigate previously submitted prompts. |
+| `Ctrl+O` | Switch to the editor with the current prompt, then return to the input. |
+| `Ctrl+C` | Clear the current prompt or interrupt model generation. |
+| `Ctrl+D` | Exit interactive mode. |
 
 Commands are also accepted in non-interactive mode. Each quoted argument is
 executed as one instruction.
